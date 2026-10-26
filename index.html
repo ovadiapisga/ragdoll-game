@@ -40,7 +40,8 @@
   @keyframes star { to { transform: translate(calc(-50% + var(--dx)), calc(-50% + var(--dy))) rotate(225deg) scale(0.2); opacity: 0; } }
 </style>
 <script type="importmap">
-{ "imports": { "three": "https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js" } }
+{ "imports": { "three": "https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js",
+               "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.160.0/examples/jsm/" } }
 </script>
 </head>
 <body>
@@ -53,6 +54,7 @@
 
 <script type="module">
 import * as THREE from 'three';
+import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
 
 // ---------- סצנה ----------
 const renderer = new THREE.WebGLRenderer({ antialias: true });
@@ -122,6 +124,19 @@ addP('knL', -0.11, 0.5, 0, 0.055);
 addP('knR', 0.11, 0.5, 0, 0.055);
 addP('ftL', -0.12, 0.06, 0.03, 0.05);
 addP('ftR', 0.12, 0.06, 0.03, 0.05);
+
+// תנוחות עמידה: הבובה המצוירת, והאישה הריאליסטית (לפי השלד של המודל)
+const DOLL_POSE = {};
+for (const q of parts) DOLL_POSE[q.name] = [...q.rest.toArray(), q.r];
+const WOMAN_POSE = {
+  head: [0, 1.47, -0.03, 0.11], nose: [0, 1.47, 0.09, 0.02], neck: [0, 1.309, -0.007, 0.05],
+  shL: [-0.102, 1.275, -0.006, 0.05], shR: [0.102, 1.275, -0.007, 0.05], chest: [0, 1.17, 0.08, 0.06],
+  elL: [-0.14, 1.035, -0.005, 0.04], elR: [0.14, 1.035, -0.005, 0.04],
+  haL: [-0.16, 0.82, 0.01, 0.045], haR: [0.16, 0.82, 0.01, 0.045],
+  pelvis: [0, 1.026, -0.005, 0.09], hipL: [-0.066, 0.938, -0.01, 0.08], hipR: [0.066, 0.938, -0.01, 0.08],
+  knL: [-0.094, 0.577, -0.003, 0.055], knR: [0.094, 0.577, -0.003, 0.055],
+  ftL: [-0.105, 0.115, 0.002, 0.08], ftR: [0.105, 0.115, 0.007, 0.08],
+};
 
 const sticks = [];
 function link(a, b) {
@@ -195,6 +210,14 @@ function step() {
     }
     for (const q of parts) collide(q);
   }
+}
+
+function setRestPose(pose) {
+  for (const q of parts) {
+    const [x, y, z, r] = pose[q.name];
+    q.rest.set(x, y, z); q.r = r;
+  }
+  for (const s of sticks) s.len = s.a.rest.distanceTo(s.b.rest);
 }
 
 function resetDoll() {
@@ -281,6 +304,87 @@ const antenna = makeMesh(cyl, shoeMat, [P.head]); antenna.scale.set(0.008, 0.1, 
 const bulb = makeMesh(ball, extraMat, [P.head]); bulb.scale.setScalar(0.025); bulb.position.set(0, 0.22, 0);
 [nose, antenna, bulb, face, hair, pony, eyeL, eyeR, cheekL, cheekR, smile, ohMouth].forEach(m => { scene.remove(m); headG.add(m); });
 
+// מערכות צירים של הגוף והראש (get = מיקום נוכחי או מיקום מנוחה)
+const vR = new THREE.Vector3(), vU = new THREE.Vector3(), vF = new THREE.Vector3();
+function bodyBasis(get, m) {
+  vU.subVectors(get(P.neck), get(P.pelvis)).normalize();
+  vR.subVectors(get(P.shR), get(P.shL)); vR.addScaledVector(vU, -vR.dot(vU)).normalize();
+  vF.crossVectors(vR, vU);
+  return m.makeBasis(vR, vU, vF);
+}
+function headBasis(get, m) {
+  vU.subVectors(get(P.head), get(P.neck)).normalize();
+  vF.subVectors(get(P.nose), get(P.head)); vF.addScaledVector(vU, -vF.dot(vU)).normalize();
+  vR.crossVectors(vU, vF);
+  return m.makeBasis(vR, vU, vF);
+}
+const now = q => q.p, rest = q => q.rest;
+
+function setDollVisible(v) {
+  for (const s of segs) s.m.visible = v;
+  for (const j of joints) j.m.visible = v;
+  torso.visible = headG.visible = v;
+}
+
+// ---------- אישה ריאליסטית (מודל תלת־ממד עם שלד) ----------
+let woman = null;
+new GLTFLoader().load('models/woman.glb', g => {
+  const root = g.scene;
+  const meshes = [];
+  root.traverse(o => { if (o.isSkinnedMesh) { o.castShadow = true; o.frustumCulled = false; meshes.push(o); } });
+  const B = n => root.getObjectByName('mixamorig' + n);
+  root.updateMatrixWorld(true);
+  const bind = [];
+  root.traverse(o => { if (o.isBone) bind.push([o, o.quaternion.clone()]); });
+  woman = {
+    root, meshes, bind,
+    hips: B('Hips'), neck: B('Neck'), head: B('Head'),
+    // הצד הימני של המודל נמצא בצד שמאל של המסך
+    arms: [[B('RightArm'), B('RightForeArm'), P.shL, P.elL], [B('RightForeArm'), B('RightHand'), P.elL, P.haL],
+           [B('LeftArm'), B('LeftForeArm'), P.shR, P.elR], [B('LeftForeArm'), B('LeftHand'), P.elR, P.haR],
+           [B('RightUpLeg'), B('RightLeg'), P.hipL, P.knL], [B('RightLeg'), B('RightFoot'), P.knL, P.ftL],
+           [B('LeftUpLeg'), B('LeftLeg'), P.hipR, P.knR], [B('LeftLeg'), B('LeftFoot'), P.knR, P.ftR]],
+    hipsQ: B('Hips').getWorldQuaternion(new THREE.Quaternion()),
+    headQ: B('Head').getWorldQuaternion(new THREE.Quaternion()),
+    restBody: new THREE.Matrix4(), restHead: new THREE.Matrix4(),
+  };
+  root.visible = false;
+  scene.add(root);
+  if (current === 'woman') { setCharacter('woman'); resetDoll(); }
+});
+
+const qa = new THREE.Quaternion(), qb = new THREE.Quaternion(), qc = new THREE.Quaternion();
+const va = new THREE.Vector3(), vb = new THREE.Vector3(), mb = new THREE.Matrix4();
+function setWorldQ(bone, q) {
+  bone.parent.getWorldQuaternion(qc).invert();
+  bone.quaternion.copy(qc.multiply(q));
+  bone.updateMatrixWorld(true);
+}
+// מסובב עצם כך שיצביע מנקודה from לנקודה to
+function aimBone(bone, child, from, to) {
+  bone.getWorldPosition(va); child.getWorldPosition(vb);
+  vb.sub(va).normalize();
+  va.subVectors(to.p, from.p).normalize();
+  qa.setFromUnitVectors(vb, va);
+  bone.getWorldQuaternion(qb).premultiply(qa);
+  setWorldQ(bone, qb);
+}
+function driveWoman() {
+  const w = woman;
+  for (const [b, q] of w.bind) b.quaternion.copy(q);
+  w.root.updateMatrixWorld(true);
+  // אגן: מיקום + סיבוב לפי הגוף
+  w.hips.parent.updateWorldMatrix(true, false);
+  w.hips.position.copy(P.pelvis.p);
+  w.hips.parent.worldToLocal(w.hips.position);
+  qa.setFromRotationMatrix(bodyBasis(now, mb).multiply(w.restBody));
+  setWorldQ(w.hips, qb.copy(w.hipsQ).premultiply(qa));
+  aimBone(w.neck, w.head, P.neck, P.head);
+  qa.setFromRotationMatrix(headBasis(now, mb).multiply(w.restHead));
+  setWorldQ(w.head, qb.copy(w.headQ).premultiply(qa));
+  for (const [bone, child, from, to] of w.arms) aimBone(bone, child, from, to);
+}
+
 // ---------- דמויות ----------
 const SKIN = 0xf1c27d;
 const CHARACTERS = {
@@ -293,8 +397,19 @@ const CHARACTERS = {
   robot:  { name: 'רובוט', dress: 0x90a4ae, skin: 0xb0bec5, hair: null, upperArm: 0x78909c, forearm: 0x90a4ae, hand: 0x607d8b,
             legs: 0x78909c, shoes: 0x455a64, antenna: true, cheeks: false, metal: true },
 };
+let current = 'woman';
 function setCharacter(key) {
-  const c = CHARACTERS[key] || CHARACTERS.woman;
+  if (!CHARACTERS[key]) key = 'woman';
+  const c = CHARACTERS[key];
+  current = key;
+  const real = key === 'woman' && !!woman;
+  setRestPose(real ? WOMAN_POSE : DOLL_POSE);
+  setDollVisible(!real);
+  if (woman) {
+    woman.root.visible = real;
+    bodyBasis(rest, woman.restBody).invert();
+    headBasis(rest, woman.restHead).invert();
+  }
   dressMat.color.setHex(c.dress); skirt.material.color.setHex(c.dress);
   skinMat.color.setHex(c.skin);
   upperArmMat.color.setHex(c.upperArm); forearmMat.color.setHex(c.forearm);
@@ -322,9 +437,10 @@ try { saved = localStorage.getItem('doll-char') || 'woman'; } catch (e) {}
 setCharacter(saved);
 
 let ouchTimer = 0;
-const mx = new THREE.Matrix4(), vR = new THREE.Vector3(), vU = new THREE.Vector3(), vF = new THREE.Vector3();
+const mx = new THREE.Matrix4();
 
 function updateMeshes(dt) {
+  if (woman && woman.root.visible) { driveWoman(); return; }
   for (const s of segs) {
     tmp.subVectors(s.b.p, s.a.p);
     const len = tmp.length();
@@ -335,18 +451,12 @@ function updateMeshes(dt) {
   for (const j of joints) j.m.position.copy(j.p.p);
 
   // מסגרת הגוף
-  vU.subVectors(P.neck.p, P.pelvis.p).normalize();
-  vR.subVectors(P.shR.p, P.shL.p); vR.addScaledVector(vU, -vR.dot(vU)).normalize();
-  vF.crossVectors(vR, vU);
-  mx.makeBasis(vR, vU, vF);
+  bodyBasis(now, mx);
   torso.quaternion.setFromRotationMatrix(mx);
   torso.position.copy(P.pelvis.p);
 
   // מסגרת הראש
-  vU.subVectors(P.head.p, P.neck.p).normalize();
-  vF.subVectors(P.nose.p, P.head.p); vF.addScaledVector(vU, -vF.dot(vU)).normalize();
-  vR.crossVectors(vU, vF);
-  mx.makeBasis(vR, vU, vF);
+  headBasis(now, mx);
   headG.quaternion.setFromRotationMatrix(mx);
   headG.position.copy(P.head.p);
 
@@ -420,11 +530,13 @@ function castAt(x, y) {
 
 function hitTest(x, y) {
   castAt(x, y);
-  const hit = raycaster.intersectObjects(pickables, false)[0];
+  const real = woman && woman.root.visible;
+  if (real) woman.meshes.forEach(m => m.computeBoundingSphere());
+  const hit = raycaster.intersectObjects(real ? woman.meshes : pickables, false)[0];
   if (!hit) return null;
   // הנקודה הפיזיקלית הקרובה ביותר לנגיעה
   let best = null, bd = Infinity;
-  for (const q of hit.object.userData.pick) {
+  for (const q of (real ? parts : hit.object.userData.pick)) {
     const d = q.p.distanceTo(hit.point);
     if (d < bd) { bd = d; best = q; }
   }
