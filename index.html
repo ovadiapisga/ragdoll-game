@@ -1,0 +1,523 @@
+<!DOCTYPE html>
+<html dir="rtl" lang="he">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
+<meta name="theme-color" content="#cfe8ff">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<title>בובת סמרטוטים</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+  html, body { width: 100%; height: 100%; overflow: hidden; background: #cfe8ff; font-family: 'Segoe UI', Arial, sans-serif; user-select: none; -webkit-user-select: none; }
+  canvas { display: block; touch-action: none; }
+
+  #hud { position: fixed; top: 0; left: 0; right: 0; display: flex; justify-content: space-between; align-items: center;
+         padding: calc(env(safe-area-inset-top) + 12px) 16px 12px; pointer-events: none; }
+  #score { background: rgba(255,255,255,0.85); padding: 8px 14px; border-radius: 20px; font-weight: 700; font-size: 16px; color: #333; }
+  #reset { pointer-events: auto; background: #1a73e8; color: #fff; border: none; padding: 10px 16px; border-radius: 20px;
+           font-size: 15px; font-weight: 600; box-shadow: 0 2px 8px rgba(0,0,0,0.2); }
+  #reset:active { transform: scale(0.95); }
+
+  #hint { position: fixed; top: calc(env(safe-area-inset-top) + 70px); left: 50%; transform: translateX(-50%);
+          background: rgba(0,0,0,0.65); color: #fff; padding: 10px 18px; border-radius: 20px; font-size: 14px;
+          white-space: nowrap; pointer-events: none; transition: opacity 0.6s; }
+
+  #chars { position: fixed; bottom: calc(env(safe-area-inset-bottom) + 16px); left: 0; right: 0; display: flex;
+           justify-content: center; gap: 8px; padding: 0 16px; }
+  .chip { background: rgba(255,255,255,0.85); border: 2px solid transparent; border-radius: 20px; padding: 8px 12px;
+          font-size: 14px; font-weight: 600; color: #333; font-family: inherit; }
+  .chip.on { border-color: #1a73e8; background: #fff; color: #1a73e8; }
+  .pow { position: fixed; pointer-events: none; font-weight: 900; font-size: 30px; color: #ffeb3b;
+         -webkit-text-stroke: 2px #d32f2f; text-shadow: 3px 3px 0 #d32f2f; transform: translate(-50%, -50%);
+         animation: pow 0.7s ease-out forwards; }
+  @keyframes pow {
+    0%   { transform: translate(-50%, -50%) scale(0.3) rotate(-15deg); opacity: 1; }
+    30%  { transform: translate(-50%, -80%) scale(1.25) rotate(8deg); opacity: 1; }
+    100% { transform: translate(-50%, -160%) scale(1) rotate(0deg); opacity: 0; }
+  }
+  .star { position: fixed; pointer-events: none; width: 14px; height: 14px; background: #ffc107; border-radius: 2px;
+          transform: translate(-50%, -50%) rotate(45deg); animation: star 0.5s ease-out forwards; }
+  @keyframes star { to { transform: translate(calc(-50% + var(--dx)), calc(-50% + var(--dy))) rotate(225deg) scale(0.2); opacity: 0; } }
+</style>
+<script type="importmap">
+{ "imports": { "three": "https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js" } }
+</script>
+</head>
+<body>
+<div id="hud">
+  <div id="score">מכות: 0</div>
+  <button id="reset">להקים אותה</button>
+</div>
+<div id="chars"></div>
+<div id="hint">נגיעה = מכה • גרירה = הזזה</div>
+
+<script type="module">
+import * as THREE from 'three';
+
+// ---------- סצנה ----------
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+renderer.shadowMap.enabled = true;
+renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+document.body.prepend(renderer.domElement);
+
+const scene = new THREE.Scene();
+scene.background = new THREE.Color(0xcfe8ff);
+const camera = new THREE.PerspectiveCamera(45, 1, 0.1, 100);
+
+scene.add(new THREE.HemisphereLight(0xffffff, 0x88aa77, 1.1));
+const sun = new THREE.DirectionalLight(0xffffff, 1.6);
+sun.position.set(3, 8, 5);
+sun.castShadow = true;
+sun.shadow.mapSize.set(1024, 1024);
+Object.assign(sun.shadow.camera, { left: -6, right: 6, top: 6, bottom: -2 });
+scene.add(sun);
+
+const ground = new THREE.Mesh(new THREE.PlaneGeometry(40, 20), new THREE.MeshLambertMaterial({ color: 0x9ccc65 }));
+ground.rotation.x = -Math.PI / 2;
+ground.receiveShadow = true;
+scene.add(ground);
+
+// גבולות העולם (מתעדכנים לפי גודל המסך)
+const bounds = { x: 1.5, top: 5, z: 0.6 };
+
+function resize() {
+  const w = window.innerWidth, h = window.innerHeight, aspect = w / h;
+  renderer.setSize(w, h);
+  camera.aspect = aspect;
+  const t = Math.tan(THREE.MathUtils.degToRad(camera.fov / 2));
+  const dist = Math.max(1.1 / (t * aspect), 1.3 / t); // רוחב מינימלי 2.2 מ', גובה מינימלי 2.6 מ'
+  const halfH = t * dist;
+  const targetY = halfH * 0.78; // הרצפה בתחתית המסך
+  camera.position.set(0, targetY, dist);
+  camera.lookAt(0, targetY, 0);
+  camera.updateProjectionMatrix();
+  bounds.x = t * dist * aspect - 0.3;
+  bounds.top = targetY + halfH - 0.1;
+}
+window.addEventListener('resize', resize);
+resize();
+
+// ---------- פיזיקה (בובת סמרטוטים - Verlet) ----------
+const P = {}; // נקודות לפי שם
+const parts = [];
+function addP(name, x, y, z, r) {
+  const p = { name, p: new THREE.Vector3(x, y, z), o: new THREE.Vector3(x, y, z), rest: new THREE.Vector3(x, y, z), r, links: [] };
+  P[name] = p; parts.push(p); return p;
+}
+addP('head', 0, 1.58, 0, 0.12);
+addP('nose', 0, 1.58, 0.12, 0.02);
+addP('neck', 0, 1.42, 0, 0.05);
+addP('shL', -0.19, 1.38, 0, 0.06);
+addP('shR', 0.19, 1.38, 0, 0.06);
+addP('chest', 0, 1.2, 0.09, 0.05);
+addP('elL', -0.24, 1.1, 0, 0.045);
+addP('elR', 0.24, 1.1, 0, 0.045);
+addP('haL', -0.27, 0.84, 0.02, 0.045);
+addP('haR', 0.27, 0.84, 0.02, 0.045);
+addP('pelvis', 0, 0.95, 0, 0.08);
+addP('hipL', -0.1, 0.9, 0, 0.07);
+addP('hipR', 0.1, 0.9, 0, 0.07);
+addP('knL', -0.11, 0.5, 0, 0.055);
+addP('knR', 0.11, 0.5, 0, 0.055);
+addP('ftL', -0.12, 0.06, 0.03, 0.05);
+addP('ftR', 0.12, 0.06, 0.03, 0.05);
+
+const sticks = [];
+function link(a, b) {
+  const A = P[a], B = P[b];
+  sticks.push({ a: A, b: B, len: A.rest.distanceTo(B.rest) });
+  A.links.push(B); B.links.push(A);
+}
+[
+  ['head', 'neck'], ['head', 'nose'], ['nose', 'neck'], ['nose', 'shL'], ['nose', 'shR'], ['head', 'shL'], ['head', 'shR'],
+  ['neck', 'shL'], ['neck', 'shR'], ['shL', 'shR'],
+  ['shL', 'elL'], ['elL', 'haL'], ['shR', 'elR'], ['elR', 'haR'],
+  ['neck', 'pelvis'], ['shL', 'hipL'], ['shR', 'hipR'], ['shL', 'hipR'], ['shR', 'hipL'],
+  ['chest', 'shL'], ['chest', 'shR'], ['chest', 'hipL'], ['chest', 'hipR'], ['chest', 'neck'], ['chest', 'pelvis'],
+  ['pelvis', 'hipL'], ['pelvis', 'hipR'], ['hipL', 'hipR'],
+  ['hipL', 'knL'], ['knL', 'ftL'], ['hipR', 'knR'], ['knR', 'ftR'],
+].forEach(([a, b]) => link(a, b));
+
+const GRAVITY = -9.8, DT = 1 / 120, DAMP = 0.995;
+let standStrength = 1;  // כמה חזק היא מנסה לעמוד (0 = רפויה לגמרי)
+let limpTimer = 0;      // זמן שנשאר לה "מעולפת" לפני שמתחילה לקום
+let grabbed = null;
+const dragTarget = new THREE.Vector3();
+const tmp = new THREE.Vector3(), off = new THREE.Vector3();
+
+function collide(q) {
+  const p = q.p, o = q.o;
+  if (p.y < q.r) { const vy = p.y - o.y; p.y = q.r; o.y = p.y + vy * 0.3; o.x += (p.x - o.x) * 0.25; o.z += (p.z - o.z) * 0.25; }
+  if (p.y > bounds.top) { p.y = bounds.top; o.y = p.y; }
+  if (p.x < -bounds.x) { const vx = p.x - o.x; p.x = -bounds.x; o.x = p.x + vx * 0.4; }
+  if (p.x > bounds.x) { const vx = p.x - o.x; p.x = bounds.x; o.x = p.x + vx * 0.4; }
+  if (p.z < -bounds.z) { p.z = -bounds.z; o.z = p.z; }
+  if (p.z > bounds.z) { p.z = bounds.z; o.z = p.z; }
+}
+
+function step() {
+  if (limpTimer > 0) limpTimer -= DT;
+  else if (!grabbed) standStrength = Math.min(1, standStrength + DT / 2.5);
+
+  // תנועה + כוח משיכה
+  for (const q of parts) {
+    if (q === grabbed) continue;
+    tmp.subVectors(q.p, q.o).multiplyScalar(DAMP);
+    q.o.copy(q.p);
+    q.p.add(tmp);
+    q.p.y += GRAVITY * DT * DT;
+  }
+  // "שרירים" - משיכה לתנוחת עמידה במקום שבו היא נמצאת
+  if (standStrength > 0) {
+    const k = 0.06 * standStrength * standStrength;
+    off.set(P.pelvis.p.x - P.pelvis.rest.x, 0, P.pelvis.p.z - P.pelvis.rest.z);
+    for (const q of parts) {
+      if (q === grabbed) continue;
+      tmp.copy(q.rest).add(off).sub(q.p).multiplyScalar(k);
+      q.p.add(tmp);
+    }
+  }
+  // גרירה
+  if (grabbed) {
+    grabbed.o.copy(grabbed.p);
+    grabbed.p.lerp(dragTarget, 0.5);
+  }
+  // אילוצים
+  for (let it = 0; it < 12; it++) {
+    for (const s of sticks) {
+      tmp.subVectors(s.b.p, s.a.p);
+      const d = tmp.length() || 1e-6;
+      const diff = (d - s.len) / d;
+      if (s.a === grabbed) s.b.p.addScaledVector(tmp, -diff);
+      else if (s.b === grabbed) s.a.p.addScaledVector(tmp, diff);
+      else { s.a.p.addScaledVector(tmp, diff * 0.5); s.b.p.addScaledVector(tmp, -diff * 0.5); }
+    }
+    for (const q of parts) collide(q);
+  }
+}
+
+function resetDoll() {
+  for (const q of parts) { q.p.copy(q.rest); q.o.copy(q.rest); }
+  standStrength = 1; limpTimer = 0;
+}
+
+// ---------- גרפיקה של הדמות ----------
+const skinMat = new THREE.MeshStandardMaterial({ color: 0xf1c27d, roughness: 0.7 });
+const dressMat = new THREE.MeshStandardMaterial({ color: 0xe53935, roughness: 0.6 });
+const hairMat = new THREE.MeshStandardMaterial({ color: 0x5d3a1a, roughness: 0.8 });
+const shoeMat = new THREE.MeshStandardMaterial({ color: 0x333333, roughness: 0.5 });
+const upperArmMat = new THREE.MeshStandardMaterial({ roughness: 0.7 });
+const forearmMat = new THREE.MeshStandardMaterial({ roughness: 0.7 });
+const handMat = new THREE.MeshStandardMaterial({ roughness: 0.7 });
+const legMat = new THREE.MeshStandardMaterial({ roughness: 0.7 });
+const tieMat = new THREE.MeshStandardMaterial({ color: 0x1565c0, roughness: 0.5 });
+const extraMat = new THREE.MeshStandardMaterial({ color: 0xff1744, roughness: 0.4 });
+const darkMat = new THREE.MeshBasicMaterial({ color: 0x222222 });
+const blushMat = new THREE.MeshBasicMaterial({ color: 0xff8a80 });
+
+const pickables = [];
+function makeMesh(geo, mat, pick) {
+  const m = new THREE.Mesh(geo, mat);
+  m.castShadow = true;
+  m.userData.pick = pick;
+  scene.add(m);
+  pickables.push(m);
+  return m;
+}
+
+// גפיים: גליל בין שתי נקודות + כדור במפרק
+const UP = new THREE.Vector3(0, 1, 0);
+const cyl = new THREE.CylinderGeometry(1, 1, 1, 12);
+const ball = new THREE.SphereGeometry(1, 16, 12);
+const segs = [];
+function seg(a, b, r, mat) {
+  const m = makeMesh(cyl, mat, [P[a], P[b]]);
+  segs.push({ m, a: P[a], b: P[b], r });
+}
+const joints = [];
+function joint(n, r, mat) {
+  const m = makeMesh(ball, mat, [P[n]]);
+  m.scale.setScalar(r);
+  joints.push({ m, p: P[n] });
+}
+seg('shL', 'elL', 0.04, upperArmMat); seg('elL', 'haL', 0.035, forearmMat);
+seg('shR', 'elR', 0.04, upperArmMat); seg('elR', 'haR', 0.035, forearmMat);
+seg('hipL', 'knL', 0.055, legMat); seg('knL', 'ftL', 0.045, legMat);
+seg('hipR', 'knR', 0.055, legMat); seg('knR', 'ftR', 0.045, legMat);
+seg('neck', 'head', 0.035, skinMat);
+joint('shL', 0.055, dressMat); joint('shR', 0.055, dressMat);
+joint('elL', 0.04, upperArmMat); joint('elR', 0.04, upperArmMat);
+joint('haL', 0.045, handMat); joint('haR', 0.045, handMat);
+joint('knL', 0.055, legMat); joint('knR', 0.055, legMat);
+joint('ftL', 0.06, shoeMat); joint('ftR', 0.06, shoeMat);
+
+// גוף ושמלה
+const torso = new THREE.Group(); scene.add(torso);
+const upper = makeMesh(ball, dressMat, [P.shL, P.shR, P.chest, P.neck]);
+upper.scale.set(0.18, 0.26, 0.11); upper.position.set(0, 0.22, 0);
+const skirt = makeMesh(new THREE.CylinderGeometry(0.13, 0.27, 0.42, 20, 1, true), dressMat, [P.pelvis, P.hipL, P.hipR]);
+skirt.material = dressMat.clone(); skirt.material.side = THREE.DoubleSide;
+skirt.position.set(0, -0.08, 0);
+const tie = makeMesh(new THREE.BoxGeometry(0.04, 0.24, 0.01), tieMat, [P.chest]);
+tie.position.set(0, 0.3, 0.11); tie.rotation.x = -0.25;
+scene.remove(upper, skirt, tie); torso.add(upper, skirt, tie);
+
+// ראש
+const headG = new THREE.Group(); scene.add(headG);
+const face = makeMesh(ball, skinMat, [P.head]); face.scale.setScalar(0.12);
+const hair = makeMesh(ball, hairMat, [P.head]); hair.scale.set(0.13, 0.13, 0.12); hair.position.set(0, 0.025, -0.03);
+const pony = makeMesh(ball, hairMat, [P.head]); pony.scale.set(0.06, 0.09, 0.06); pony.position.set(0, -0.02, -0.15);
+const eyeL = makeMesh(ball, darkMat, [P.head]); eyeL.scale.setScalar(0.017); eyeL.position.set(-0.042, 0.01, 0.108);
+const eyeR = makeMesh(ball, darkMat, [P.head]); eyeR.scale.setScalar(0.017); eyeR.position.set(0.042, 0.01, 0.108);
+const cheekL = makeMesh(ball, blushMat, [P.head]); cheekL.scale.set(0.02, 0.012, 0.01); cheekL.position.set(-0.065, -0.03, 0.095);
+const cheekR = makeMesh(ball, blushMat, [P.head]); cheekR.scale.set(0.02, 0.012, 0.01); cheekR.position.set(0.065, -0.03, 0.095);
+const smile = makeMesh(new THREE.TorusGeometry(0.03, 0.006, 6, 16, Math.PI), darkMat, [P.head]);
+smile.position.set(0, -0.035, 0.11); smile.rotation.z = Math.PI;
+const ohMouth = makeMesh(new THREE.TorusGeometry(0.018, 0.007, 6, 16), darkMat, [P.head]);
+ohMouth.position.set(0, -0.05, 0.108); ohMouth.visible = false;
+const nose = makeMesh(ball, extraMat, [P.head]); nose.scale.setScalar(0.03); nose.position.set(0, -0.005, 0.12);
+const antenna = makeMesh(cyl, shoeMat, [P.head]); antenna.scale.set(0.008, 0.1, 0.008); antenna.position.set(0, 0.16, 0);
+const bulb = makeMesh(ball, extraMat, [P.head]); bulb.scale.setScalar(0.025); bulb.position.set(0, 0.22, 0);
+[nose, antenna, bulb, face, hair, pony, eyeL, eyeR, cheekL, cheekR, smile, ohMouth].forEach(m => { scene.remove(m); headG.add(m); });
+
+// ---------- דמויות ----------
+const SKIN = 0xf1c27d;
+const CHARACTERS = {
+  woman:  { name: 'אישה', dress: 0xe53935, skin: SKIN, hair: 0x5d3a1a, upperArm: SKIN, forearm: SKIN, hand: SKIN, legs: SKIN,
+            shoes: 0x333333, skirt: true, pony: true, hairScale: [0.13, 0.13, 0.12], cheeks: true },
+  suit:   { name: 'איש בחליפה', dress: 0x263c6b, skin: SKIN, hair: 0x222222, upperArm: 0x263c6b, forearm: 0x263c6b, hand: SKIN,
+            legs: 0x263c6b, shoes: 0x1a1a1a, tie: true, hairScale: [0.125, 0.11, 0.115], cheeks: false },
+  clown:  { name: 'ליצן', dress: 0x8e24aa, skin: 0xfff3e0, hair: 0xff6d00, upperArm: 0xffeb3b, forearm: 0xfff3e0, hand: 0xffffff,
+            legs: 0x43a047, shoes: 0xd50000, skirt: true, nose: true, hairScale: [0.17, 0.12, 0.13], cheeks: true },
+  robot:  { name: 'רובוט', dress: 0x90a4ae, skin: 0xb0bec5, hair: null, upperArm: 0x78909c, forearm: 0x90a4ae, hand: 0x607d8b,
+            legs: 0x78909c, shoes: 0x455a64, antenna: true, cheeks: false, metal: true },
+};
+function setCharacter(key) {
+  const c = CHARACTERS[key] || CHARACTERS.woman;
+  dressMat.color.setHex(c.dress); skirt.material.color.setHex(c.dress);
+  skinMat.color.setHex(c.skin);
+  upperArmMat.color.setHex(c.upperArm); forearmMat.color.setHex(c.forearm);
+  handMat.color.setHex(c.hand); legMat.color.setHex(c.legs); shoeMat.color.setHex(c.shoes);
+  for (const m of [dressMat, skinMat, upperArmMat, forearmMat, handMat, legMat]) {
+    m.metalness = c.metal ? 0.25 : 0; m.roughness = c.metal ? 0.35 : 0.7;
+  }
+  hair.visible = !!c.hair; pony.visible = !!c.pony;
+  if (c.hair) { hairMat.color.setHex(c.hair); hair.scale.set(...c.hairScale); }
+  skirt.visible = !!c.skirt; tie.visible = !!c.tie;
+  nose.visible = !!c.nose; antenna.visible = bulb.visible = !!c.antenna;
+  cheekL.visible = cheekR.visible = c.cheeks;
+  document.querySelectorAll('.chip').forEach(b => b.classList.toggle('on', b.dataset.key === key));
+  try { localStorage.setItem('doll-char', key); } catch (e) {}
+}
+const charsEl = document.getElementById('chars');
+for (const [key, c] of Object.entries(CHARACTERS)) {
+  const b = document.createElement('button');
+  b.className = 'chip'; b.dataset.key = key; b.textContent = c.name;
+  b.addEventListener('click', () => { setCharacter(key); resetDoll(); });
+  charsEl.appendChild(b);
+}
+let saved = 'woman';
+try { saved = localStorage.getItem('doll-char') || 'woman'; } catch (e) {}
+setCharacter(saved);
+
+let ouchTimer = 0;
+const mx = new THREE.Matrix4(), vR = new THREE.Vector3(), vU = new THREE.Vector3(), vF = new THREE.Vector3();
+
+function updateMeshes(dt) {
+  for (const s of segs) {
+    tmp.subVectors(s.b.p, s.a.p);
+    const len = tmp.length();
+    s.m.position.addVectors(s.a.p, s.b.p).multiplyScalar(0.5);
+    s.m.quaternion.setFromUnitVectors(UP, tmp.divideScalar(len || 1));
+    s.m.scale.set(s.r, len, s.r);
+  }
+  for (const j of joints) j.m.position.copy(j.p.p);
+
+  // מסגרת הגוף
+  vU.subVectors(P.neck.p, P.pelvis.p).normalize();
+  vR.subVectors(P.shR.p, P.shL.p); vR.addScaledVector(vU, -vR.dot(vU)).normalize();
+  vF.crossVectors(vR, vU);
+  mx.makeBasis(vR, vU, vF);
+  torso.quaternion.setFromRotationMatrix(mx);
+  torso.position.copy(P.pelvis.p);
+
+  // מסגרת הראש
+  vU.subVectors(P.head.p, P.neck.p).normalize();
+  vF.subVectors(P.nose.p, P.head.p); vF.addScaledVector(vU, -vF.dot(vU)).normalize();
+  vR.crossVectors(vU, vF);
+  mx.makeBasis(vR, vU, vF);
+  headG.quaternion.setFromRotationMatrix(mx);
+  headG.position.copy(P.head.p);
+
+  // הבעת פנים
+  ouchTimer = Math.max(0, ouchTimer - dt);
+  const ouch = ouchTimer > 0 || grabbed;
+  eyeL.scale.y = eyeR.scale.y = ouch ? 0.004 : 0.017;
+  smile.visible = !ouch; ohMouth.visible = !!ouch;
+}
+
+// ---------- אפקטים ----------
+const words = ['בום!', 'פאו!', 'אאוץ\'!', 'אוי!', 'באם!', 'טראח!'];
+function pow(x, y) {
+  const el = document.createElement('div');
+  el.className = 'pow';
+  el.textContent = words[Math.floor(Math.random() * words.length)];
+  el.style.left = x + 'px'; el.style.top = y + 'px';
+  document.body.appendChild(el);
+  setTimeout(() => el.remove(), 700);
+  for (let i = 0; i < 8; i++) {
+    const s = document.createElement('div');
+    s.className = 'star';
+    const a = (i / 8) * Math.PI * 2;
+    s.style.left = x + 'px'; s.style.top = y + 'px';
+    s.style.setProperty('--dx', Math.cos(a) * 60 + 'px');
+    s.style.setProperty('--dy', Math.sin(a) * 60 + 'px');
+    document.body.appendChild(s);
+    setTimeout(() => s.remove(), 500);
+  }
+}
+
+let audio = null;
+function thump() {
+  try {
+    audio = audio || new (window.AudioContext || window.webkitAudioContext)();
+    const t = audio.currentTime;
+    const osc = audio.createOscillator(), g = audio.createGain();
+    osc.type = 'sine';
+    osc.frequency.setValueAtTime(220, t);
+    osc.frequency.exponentialRampToValueAtTime(50, t + 0.15);
+    g.gain.setValueAtTime(0.6, t);
+    g.gain.exponentialRampToValueAtTime(0.001, t + 0.2);
+    osc.connect(g).connect(audio.destination);
+    osc.start(t); osc.stop(t + 0.2);
+    // רעש קצר ל"חבטה"
+    const buf = audio.createBuffer(1, audio.sampleRate * 0.08, audio.sampleRate);
+    const data = buf.getChannelData(0);
+    for (let i = 0; i < data.length; i++) data[i] = (Math.random() * 2 - 1) * (1 - i / data.length);
+    const n = audio.createBufferSource(), ng = audio.createGain();
+    n.buffer = buf; ng.gain.value = 0.35;
+    n.connect(ng).connect(audio.destination);
+    n.start(t);
+  } catch (e) {}
+}
+
+let shake = 0;
+
+// ---------- נגיעות ----------
+const raycaster = new THREE.Raycaster();
+const ndc = new THREE.Vector2();
+const dragPlane = new THREE.Plane();
+let pointer = null; // { id, x, y, t, part, hit, moved }
+let hits = 0;
+const scoreEl = document.getElementById('score');
+const hintEl = document.getElementById('hint');
+
+function castAt(x, y) {
+  ndc.set((x / window.innerWidth) * 2 - 1, -(y / window.innerHeight) * 2 + 1);
+  raycaster.setFromCamera(ndc, camera);
+}
+
+function hitTest(x, y) {
+  castAt(x, y);
+  const hit = raycaster.intersectObjects(pickables, false)[0];
+  if (!hit) return null;
+  // הנקודה הפיזיקלית הקרובה ביותר לנגיעה
+  let best = null, bd = Infinity;
+  for (const q of hit.object.userData.pick) {
+    const d = q.p.distanceTo(hit.point);
+    if (d < bd) { bd = d; best = q; }
+  }
+  return { part: best, point: hit.point.clone() };
+}
+
+const canvas = renderer.domElement;
+canvas.addEventListener('pointerdown', e => {
+  if (pointer) return;
+  const h = hitTest(e.clientX, e.clientY);
+  if (!h) return;
+  canvas.setPointerCapture(e.pointerId);
+  pointer = { id: e.pointerId, x: e.clientX, y: e.clientY, t: performance.now(), part: h.part, hit: h.point, moved: false };
+  hintEl.style.opacity = 0;
+});
+
+canvas.addEventListener('pointermove', e => {
+  if (!pointer || e.pointerId !== pointer.id) return;
+  if (!pointer.moved && Math.hypot(e.clientX - pointer.x, e.clientY - pointer.y) > 10) {
+    pointer.moved = true;
+    grabbed = pointer.part;
+    standStrength = 0;
+    dragPlane.setFromNormalAndCoplanarPoint(camera.getWorldDirection(tmp).negate(), grabbed.p);
+  }
+  if (pointer.moved) {
+    castAt(e.clientX, e.clientY);
+    raycaster.ray.intersectPlane(dragPlane, dragTarget);
+    dragTarget.y = Math.max(dragTarget.y, grabbed.r);
+    dragTarget.x = THREE.MathUtils.clamp(dragTarget.x, -bounds.x, bounds.x);
+  }
+});
+
+function endPointer(e) {
+  if (!pointer || e.pointerId !== pointer.id) return;
+  if (pointer.moved) {
+    grabbed = null;
+    limpTimer = 1.2;
+  } else {
+    punch(pointer.part, pointer.hit, e.clientX, e.clientY);
+  }
+  pointer = null;
+}
+canvas.addEventListener('pointerup', endPointer);
+canvas.addEventListener('pointercancel', endPointer);
+
+function punch(part, point, sx, sy) {
+  castAt(sx, sy);
+  const center = P.chest.p;
+  const dir = new THREE.Vector3().subVectors(point, center).setZ(0);
+  if (dir.lengthSq() < 1e-4) dir.set(Math.random() - 0.5, 0, 0);
+  dir.normalize().multiplyScalar(0.7)
+    .addScaledVector(raycaster.ray.direction, 0.5)
+    .add(new THREE.Vector3((Math.random() - 0.5) * 0.4, 0.45, 0))
+    .normalize();
+  const power = 0.1;
+  for (const q of parts) q.p.addScaledVector(dir, power * 0.25); // כל הגוף עף קצת
+  for (const n of part.links) n.p.addScaledVector(dir, power * 0.4);
+  part.p.addScaledVector(dir, power * 0.6);
+
+  standStrength = 0;
+  limpTimer = 1.5;
+  ouchTimer = 0.8;
+  shake = 0.06;
+  hits++;
+  scoreEl.textContent = 'מכות: ' + hits;
+  pow(sx, sy);
+  thump();
+  if (navigator.vibrate) navigator.vibrate(30);
+}
+
+document.getElementById('reset').addEventListener('click', resetDoll);
+
+// ---------- לולאה ראשית ----------
+let last = performance.now(), acc = 0;
+const basePos = new THREE.Vector3();
+function loop(now) {
+  const dt = Math.min(0.05, (now - last) / 1000);
+  last = now;
+  acc += dt;
+  while (acc >= DT) { step(); acc -= DT; }
+  updateMeshes(dt);
+
+  basePos.copy(camera.position);
+  if (shake > 0) {
+    camera.position.x += (Math.random() - 0.5) * shake;
+    camera.position.y += (Math.random() - 0.5) * shake;
+    shake = Math.max(0, shake - dt * 0.3);
+  }
+  renderer.render(scene, camera);
+  camera.position.copy(basePos);
+  requestAnimationFrame(loop);
+}
+requestAnimationFrame(loop);
+</script>
+</body>
+</html>
